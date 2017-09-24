@@ -1,17 +1,11 @@
 use std::io::prelude::*;
-use std::io::{self, ErrorKind, SeekFrom};
-use std::collections::HashMap;
+use std::io::{self, SeekFrom};
 use std::cmp;
 
 use lru_cache::LruCache;
 
 /// Slab size MUST be a power of 2!
 const SLAB_SIZE: usize = 512*1024; // Change this number to change the SLAB_SIZE (currently @ 512kb)
-
-/// Used to turn a file index into an array index (since SLAB_SIZE is a power of two,
-/// subtracting one from it will yield all ones, and anding it with a number will
-/// yield only the lowest n bits, where SLAB_SIZE = 2^n
-const SLAB_MASK: u64 = SLAB_SIZE as u64 - 1;
 
 const DEFAULT_CAPACITY: usize = 16;
 
@@ -61,6 +55,7 @@ pub struct BufFile<F: Write + Read + Seek> {
     /// Represents the current location of the cursor.
     /// This does not reflect the actual location of the cursor in the file.
     cursor: u64,
+    end: u64,
 }
 
 impl<F: Write + Read + Seek> BufFile<F> {
@@ -72,10 +67,12 @@ impl<F: Write + Read + Seek> BufFile<F> {
     /// Creates a new BufFile with the specified number of slabs.
     pub fn with_capacity(mut file: F, capacity: usize) -> io::Result<BufFile<F>> {
         let current = file.seek(SeekFrom::Current(0))?;
+        let end = file.seek(SeekFrom::End(0))?;
         Ok(BufFile {
             slabs: LruCache::new(capacity),
             file: Some(file),
             cursor: current,      // Since the cursor is at the start of the file
+            end: end,
         })
     }
 
@@ -171,8 +168,12 @@ impl<F: Write + Read + Seek> Read for BufFile<F> {
                 }
                 slab.bytes_used += bytes_read;
             }
-            let len = slab.bytes_used - cursor_offset;
-            buf[..len].copy_from_slice(&slab.data[cursor_offset..slab.bytes_used]);
+            let len = if slab.bytes_used <= cursor_offset {
+                0
+            } else {
+                cmp::min(buf.len(), slab.bytes_used - cursor_offset)
+            };
+            buf[..len].copy_from_slice(&slab.data[cursor_offset..cursor_offset + len]);
             len
         };
 
@@ -200,9 +201,13 @@ impl<F: Write + Read + Seek> Write for BufFile<F> {
             }
             let len = cmp::min(buf.len(), SLAB_SIZE - cursor_offset);
             slab.data[cursor_offset..cursor_offset + len].copy_from_slice(&buf[..len]);
+            slab.bytes_used = cursor_offset + len;
             len
         };
         self.cursor += len as u64;
+        if self.cursor > self.end {
+            self.end = self.cursor;
+        }
         Ok(len)
     }
 
@@ -224,10 +229,8 @@ impl<F: Write + Read + Seek> Seek for BufFile<F> {
                 self.cursor
             },
             SeekFrom::End(_) => {
-                let file = self.file.as_mut().unwrap();
-                let cursor = file.seek(pos)?;
-                self.cursor = cursor;
-                cursor
+                self.cursor = self.end;
+                self.cursor
             },
             SeekFrom::Current(x) => {
                 let cur = self.cursor;
