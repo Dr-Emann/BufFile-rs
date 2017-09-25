@@ -22,65 +22,64 @@ fn test_seek_past_end_read() {
 }
 
 #[test]
-#[should_panic]
 fn test_seek_end_error() {
     let mut test_file = BufFile::new(tempfile().unwrap()).unwrap();
     test_file.seek(SeekFrom::End(1)).unwrap();
 }
 
 #[test]
-#[should_panic]
 fn test_seek_current_error() {
     let mut test_file = BufFile::new(tempfile().unwrap()).unwrap();
     test_file.seek(SeekFrom::Current(1)).unwrap();
 }
 
+struct CheckFiles<F: Read + Write + Seek> {
+    real_file: F,
+    buf_file: BufFile<F>,
+}
+
+impl<F: Read + Write + Seek> Seek for CheckFiles<F> {
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        let real = self.real_file.seek(from);
+        let buf = self.buf_file.seek(from);
+        assert_eq!(real.as_ref().ok(), buf.as_ref().ok(), "Seek results should be equal");
+        real
+    }
+}
+
+impl<F: Read + Write + Seek> Read for CheckFiles<F> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut other_buf = vec![0u8; buf.len()];
+        let real = self.real_file.read(buf);
+        let buffered = self.buf_file.read(&mut other_buf);
+        assert_eq!(real.as_ref().ok(), buffered.as_ref().ok(), "Read size should be equal");
+        if let (&Ok(real_len), &Ok(buf_len)) = (&real, &buffered) {
+            assert_eq!(&buf[..real_len], &other_buf[..buf_len], "Read data should be equal");
+        }
+        real
+    }
+}
+
+impl<F: Read + Write + Seek> Write for CheckFiles<F> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let real = self.real_file.write(buf);
+        let buffered = self.buf_file.write(buf);
+        assert_eq!(real.as_ref().ok(), buffered.as_ref().ok(), "Read size should be equal");
+        real
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let real = self.real_file.flush();
+        let buffered = self.buf_file.flush();
+        assert_eq!(real.as_ref().ok(), buffered.as_ref().ok(), "Flush results should be equal");
+        real
+    }
+}
+
 // This test verifies that the BufFile behaves exactly like a file when reading, writing, and seeking.
 // It randomly seeks and writes data, and verifies everything is completely equal with the actual file.
 #[test]
-fn test_file_buffer() {
-    struct CheckFiles<F: Read + Write + Seek> {
-        real_file: F,
-        buf_file: BufFile<F>,
-    }
-
-    impl<F: Read + Write + Seek> Seek for CheckFiles<F> {
-        fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
-            let real = self.real_file.seek(from);
-            let buf = self.buf_file.seek(from);
-            assert_eq!(real.as_ref().ok(), buf.as_ref().ok(), "Seek results should be equal");
-            real
-        }
-    }
-
-    impl<F: Read + Write + Seek> Read for CheckFiles<F> {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let mut other_buf = vec![0u8; buf.len()];
-            let real = self.real_file.read(buf);
-            let buffered = self.buf_file.read(&mut other_buf);
-            assert_eq!(real.as_ref().ok(), buffered.as_ref().ok(), "Read size should be equal");
-            if let (&Ok(real_len), &Ok(buf_len)) = (&real, &buffered) {
-                assert_eq!(&buf[..real_len], &other_buf[..buf_len], "Read data should be equal");
-            }
-            real
-        }
-    }
-
-    impl<F: Read + Write + Seek> Write for CheckFiles<F> {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            let real = self.real_file.write(buf);
-            let buffered = self.buf_file.write(buf);
-            assert_eq!(real.as_ref().ok(), buffered.as_ref().ok(), "Read size should be equal");
-            real
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            let real = self.real_file.flush();
-            let buffered = self.buf_file.flush();
-            assert_eq!(real.as_ref().ok(), buffered.as_ref().ok(), "Flush results should be equal");
-            real
-        }
-    }
+fn single_byte_read_write() {
     let now = SystemTime::now();
 
     let test_file = tempfile().unwrap();
@@ -93,11 +92,18 @@ fn test_file_buffer() {
 
     let mut rng = XorShiftRng::from_seed([0, 1, 377, 6712]);
     checker.write(&[0]).unwrap();
-    for _ in 0..100 {
-        for _ in 0..1000 {
+    for _ in 0..10 {
+        for _ in 0..100 {
             let current_len = checker.seek(SeekFrom::End(0)).unwrap();
-            let x = rng.gen_range(0, current_len);
+            let x = rng.gen_range(0, current_len + 1000);
             checker.seek(SeekFrom::Start(x)).unwrap();
+            let count = rng.gen_range(1, 100u32);
+            for _ in 0..count {
+                let byte = rng.gen::<u8>();
+                checker.write(&[byte]).unwrap();
+            }
+            let x = rng.gen_range(-(x as i64), 1000);
+            checker.seek(SeekFrom::Current(x)).unwrap();
             let count = rng.gen_range(1, 100u32);
             for _ in 0..count {
                 let byte = rng.gen::<u8>();

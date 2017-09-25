@@ -161,8 +161,12 @@ impl<F: Write + Read + Seek> Read for BufFile<F> {
         let cursor_offset = (cursor - slab_start) as usize;
         let len = {
             let (slab, file) = self.fetch_slab(idx)?;
+            if cursor_offset >= slab.bytes_used {
+                file.seek(SeekFrom::Start(slab_start + slab.bytes_used as u64))?;
+            }
             while cursor_offset >= slab.bytes_used {
                 let bytes_read = file.read(&mut slab.data[slab.bytes_used..])?;
+                // println!("read: slab {} usage ({}/{}). Read {} more", idx, slab.bytes_used, SLAB_SIZE, bytes_read);
                 if bytes_read == 0 {
                     break;
                 }
@@ -192,8 +196,12 @@ impl<F: Write + Read + Seek> Write for BufFile<F> {
             let (slab, file) = self.fetch_slab(idx)?;
             slab.dirty = true;
             // we still need to read up until the write location
+            if cursor_offset > slab.bytes_used {
+                file.seek(SeekFrom::Start(slab_start + slab.bytes_used as u64))?;
+            }
             while cursor_offset > slab.bytes_used {
                 let bytes_read = file.read(&mut slab.data[slab.bytes_used..cursor_offset])?;
+                // println!("write: slab {} usage ({}/{}). Read {} more", idx, slab.bytes_used, SLAB_SIZE, bytes_read);
                 if bytes_read == 0 {
                     break;
                 }
@@ -201,7 +209,8 @@ impl<F: Write + Read + Seek> Write for BufFile<F> {
             }
             let len = cmp::min(buf.len(), SLAB_SIZE - cursor_offset);
             slab.data[cursor_offset..cursor_offset + len].copy_from_slice(&buf[..len]);
-            slab.bytes_used = cursor_offset + len;
+            // println!("write: wrote {} bytes into slab {} at {}", len, idx, cursor_offset);
+            slab.bytes_used = cmp::max(cursor_offset + len, slab.bytes_used);
             len
         };
         self.cursor += len as u64;
@@ -233,11 +242,17 @@ impl<F: Write + Read + Seek> Seek for BufFile<F> {
                 self.cursor
             },
             SeekFrom::Current(x) => {
-                let cur = self.cursor;
+                let cursor = self.cursor;
 
                 let cursor =
-                    if x < 0 { cur - (-x) as u64 }
-                    else { cur - x as u64 };
+                    if x < 0 {
+                        if (-x) as u64 > cursor {
+                            return Err(io::ErrorKind::InvalidInput.into());
+                        }
+                        cursor - (-x) as u64
+                    } else {
+                        cursor + x as u64
+                    };
                 self.cursor = cursor;
                 cursor
             }
